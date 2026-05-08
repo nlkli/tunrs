@@ -29,7 +29,7 @@ async fn run_server<A: ToSocketAddrs>(addr: A, route_table: Vec<[String; 2]>) ->
             .is_err()
         {
             eprintln!("[control {peer_addr}] handshake timeout");
-            continue;async_smux
+            continue;
         }
 
         if buf.as_slice() != HANDSHAKE.as_bytes() {

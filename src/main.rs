@@ -9,27 +9,43 @@ use tokio::task::JoinHandle;
 const HANDSHAKE: &str = "tunrs::handshake::v1::Qt6/oNg5qu+0TX8S+gayngpumyBKy3A+ZXeZV4LP+tE=";
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(9);
+const RECONNECT_TIMEOUT: Duration = Duration::from_secs(6);
+
+const CLIENT_KEEP_ALIVE_INTERVAL: std::num::NonZeroU64 = std::num::NonZeroU64::new(18).unwrap();
+const SERVER_IDLE_TIMEOUT: std::num::NonZeroU64 = std::num::NonZeroU64::new(60).unwrap();
+
 async fn run_server<A: ToSocketAddrs>(addr: A, route_table: Vec<[String; 2]>) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
 
-    let (mut stream, peer_addr) = listener.accept().await?;
-    println!("[control] connection established from {peer_addr}");
+    let (stream, peer_addr) = loop {
+        let (mut stream, peer_addr) = listener.accept().await?;
+        println!("[control] connection established from {peer_addr}");
 
-    let mut buf = vec![0u8; HANDSHAKE.len()];
+        let mut buf = vec![0u8; HANDSHAKE.len()];
 
-    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut buf))
-        .await
-        .map_err(|_| "handshake timeout")?
-        .map_err(|_| "failed to read handshake")?;
+        if tokio::time::timeout(HANDSHAKE_TIMEOUT, stream.read_exact(&mut buf))
+            .await
+            .is_err()
+        {
+            eprintln!("[control {peer_addr}] handshake timeout");
+            continue;async_smux
+        }
 
-    if buf.as_slice() != HANDSHAKE.as_bytes() {
-        eprintln!("[control {peer_addr}] invalid handshake");
-        return Err("invalid handshake".into());
-    }
+        if buf.as_slice() != HANDSHAKE.as_bytes() {
+            eprintln!("[control {peer_addr}] invalid handshake");
+            continue;
+        }
+
+        break (stream, peer_addr);
+    };
 
     println!("[control {peer_addr}] handshake OK");
 
-    let (connector, _acceptor, worker) = MuxBuilder::server().with_connection(stream).build();
+    let (connector, _acceptor, worker) = MuxBuilder::server()
+        .with_idle_timeout(SERVER_IDLE_TIMEOUT)
+        .with_connection(stream)
+        .build();
 
     let worker_handle = tokio::spawn(async move {
         if let Err(e) = worker.await {
@@ -139,12 +155,16 @@ async fn spawn_route(
 
 async fn open_tunn<A: ToSocketAddrs>(addr: A) -> Result<()> {
     let mut stream = TcpStream::connect(addr).await?;
+
     stream.write_all(HANDSHAKE.as_bytes()).await?;
     stream.flush().await?;
 
     println!("[tunnel] handshake sent");
 
-    let (_connector, mut acceptor, worker) = MuxBuilder::client().with_connection(stream).build();
+    let (_connector, mut acceptor, worker) = MuxBuilder::client()
+        .with_keep_alive_interval(CLIENT_KEEP_ALIVE_INTERVAL)
+        .with_connection(stream)
+        .build();
 
     let worker_handle = tokio::spawn(async move {
         if let Err(e) = worker.await {
@@ -241,8 +261,7 @@ const VERSION: &str = "tunrs 0.1.1";
 const HELP: &str = r#"
 tunrs - lightweight tcp tunnel/mux proxy
 
-USAGE:
-    tunrs [OPTIONS]
+https://github.com/nlkli/tunrs
 
 OPTIONS:
     -t, --tunn <ADDR>...
@@ -384,8 +403,11 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                eprintln!("[server {ta}] restarting in 5s...");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                eprintln!(
+                    "[server {ta}] restarting in {}s...",
+                    RECONNECT_TIMEOUT.as_secs()
+                );
+                tokio::time::sleep(RECONNECT_TIMEOUT).await;
             }
         }));
     }
@@ -411,8 +433,11 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                eprintln!("[tunnel {ta}] restarting in 5s...");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                eprintln!(
+                    "[tunnel {ta}] restarting in {}s...",
+                    RECONNECT_TIMEOUT.as_secs()
+                );
+                tokio::time::sleep(RECONNECT_TIMEOUT).await;
             }
         }));
     }

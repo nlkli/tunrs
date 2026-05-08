@@ -3,8 +3,7 @@
 ```text
 tunrs - lightweight tcp tunnel/mux proxy
 
-USAGE:
-    tunrs [OPTIONS]
+https://github.com/nlkli/tunrs
 
 OPTIONS:
     -t, --tunn <ADDR>...
@@ -14,10 +13,7 @@ OPTIONS:
         route table: tunnel + one or more address pairs
 
     -h, --help
-        show this help
-
     -V, --version
-        show version
 
 EXAMPLES:
     # client mode

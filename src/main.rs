@@ -66,7 +66,6 @@ async fn run_server(addr: &str, route_table: Vec<[String; 2]>) -> Result<()> {
     });
 
     let mut handles = Vec::with_capacity(route_table.len());
-
     for [bind_addr, target_addr] in route_table {
         match spawn_route(connector.clone(), &bind_addr, &target_addr).await {
             Ok(handle) => {
@@ -88,14 +87,18 @@ async fn run_server(addr: &str, route_table: Vec<[String; 2]>) -> Result<()> {
         return Err("no routes started".into());
     }
 
+    if let Err(e) = worker_handle.await {
+        eprintln!("[server {addr}] worker join failed: {e}");
+    }
+
+    for handle in handles.iter() {
+        handle.abort();
+    }
+
     for handle in handles {
         if let Err(e) = handle.await {
             eprintln!("[server {addr}] route task join failed: {e}");
         }
-    }
-
-    if let Err(e) = worker_handle.await {
-        eprintln!("[server {addr}] worker join failed: {e}");
     }
 
     println!("[server {addr}] shutdown complete");

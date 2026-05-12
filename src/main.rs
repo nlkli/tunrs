@@ -5,15 +5,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
-const HANDSHAKE: &str = "tunrs::handshake::v1::Qt6/oNg5qu+0TX8S+gayngpumyBKy3A+ZXeZV4LP+tE=";
-
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+const HANDSHAKE: &str = "tunrs::handshake::v1::Qt6/oNg5qu+0TX8S+gayngpumyBKy3A+ZXeZV4LP+tE=";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(9);
-const RECONNECT_TIMEOUT: Duration = Duration::from_secs(6);
-
+const SERVER_RECONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const TUNN_RECONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const CLIENT_KEEP_ALIVE_INTERVAL: std::num::NonZeroU64 = std::num::NonZeroU64::new(18).unwrap();
-
 const SERVER_IDLE_TIMEOUT: std::num::NonZeroU64 = std::num::NonZeroU64::new(60).unwrap();
 
 async fn run_server(addr: &str, route_table: Vec<[String; 2]>) -> Result<()> {
@@ -77,12 +75,22 @@ async fn run_server(addr: &str, route_table: Vec<[String; 2]>) -> Result<()> {
                 eprintln!(
                     "[server {addr}] {bind_addr} -> {target_addr} route initialization failed: {e}"
                 );
+
+                worker_handle.abort();
+
+                for handle in handles.iter() {
+                    handle.abort();
+                }
+
+                return Err(e);
             }
         }
     }
 
     if handles.is_empty() {
         eprintln!("[server {addr}] no active routes");
+
+        worker_handle.abort();
 
         return Err("no routes started".into());
     }
@@ -96,9 +104,12 @@ async fn run_server(addr: &str, route_table: Vec<[String; 2]>) -> Result<()> {
     }
 
     for handle in handles {
+        let t_id = handle.id().to_string();
         if let Err(e) = handle.await {
-            eprintln!("[server {addr}] route task join failed: {e}");
+            eprintln!("[server {addr}] route task ({t_id}) join failed: {e}");
+            continue;
         }
+        println!("[server {addr}] route task ({t_id}) id completed");
     }
 
     println!("[server {addr}] shutdown complete");
@@ -325,6 +336,8 @@ async fn open_tunn(addr: &str) -> Result<()> {
         });
     }
 
+    worker_handle.abort();
+
     if let Err(e) = worker_handle.await {
         eprintln!("[tunnel {addr}] worker join failed: {e}");
     }
@@ -379,6 +392,7 @@ OPTIONS:
 
     -r, --route <TUNN> <A> <B> [<A> <B> ...]
         route table: tunnel + one or more address pairs
+        incoming conn -> <A> -> <TUNN> -> <B>
 
     -h, --help
     -V, --version
@@ -390,8 +404,8 @@ EXAMPLES:
     # server mode
     tunrs \
         --route 0.0.0.0:9000 \
-            127.0.0.1:3000 10.0.0.1:80 \
-            127.0.0.1:4000 10.0.0.2:443
+            3000           10.0.0.1:80 \
+            127.0.0.1:4000 22
 "#;
 
 impl Args {
@@ -490,34 +504,39 @@ impl Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    let pid = std::process::id();
+
+    println!("[system] {VERSION} starting");
+    println!("[system] PID: {pid}");
+
     let mut handles = Vec::new();
 
     for rt in args.route_table {
-        let ta = rt.tunn.clone();
+        let rta = rt.tunn.clone();
 
-        println!("[server] starting on {ta}");
+        println!("[server] starting on {rta}");
 
         handles.push(tokio::spawn(async move {
             let mut attempt = 0;
 
             loop {
                 attempt += 1;
-                eprintln!("[server {ta}] attempt #{attempt}");
+                eprintln!("[server {rta}] attempt #{attempt}");
 
                 match run_server(&rt.tunn, rt.pairs.clone()).await {
                     Ok(_) => {
-                        eprintln!("[server {ta}] exited normally");
+                        println!("[server {rta}] exited normally");
                     }
                     Err(e) => {
-                        eprintln!("[server {ta}] crashed: {e}");
+                        eprintln!("[server {rta}] crashed: {e}");
                     }
                 }
 
                 eprintln!(
-                    "[server {ta}] restarting in {}s...",
-                    RECONNECT_TIMEOUT.as_secs()
+                    "[server {rta}] restarting in {}s...",
+                    SERVER_RECONNECT_TIMEOUT.as_secs()
                 );
-                tokio::time::sleep(RECONNECT_TIMEOUT).await;
+                tokio::time::sleep(SERVER_RECONNECT_TIMEOUT).await;
             }
         }));
     }
@@ -545,19 +564,26 @@ async fn main() -> Result<()> {
 
                 eprintln!(
                     "[tunnel {ta}] restarting in {}s...",
-                    RECONNECT_TIMEOUT.as_secs()
+                    TUNN_RECONNECT_TIMEOUT.as_secs()
                 );
-                tokio::time::sleep(RECONNECT_TIMEOUT).await;
+                tokio::time::sleep(TUNN_RECONNECT_TIMEOUT).await;
             }
         }));
     }
 
+    println!("[system {pid}] startup complete");
+    println!("[system {pid}] waiting for shutdown signal");
+
     tokio::signal::ctrl_c().await?;
-    eprintln!("shutdown signal received");
+
+    println!("[system {pid}] shutdown signal received");
+    println!("[system {pid}] stopping background tasks");
 
     for h in handles {
         h.abort();
     }
+
+    println!("[system {pid}] shutdown complete");
 
     Ok(())
 }
